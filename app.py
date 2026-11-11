@@ -1,23 +1,20 @@
 import streamlit as st
 import os
 
-# 1. Force install the stealth package BEFORE importing it
 os.system("pip install playwright-stealth")
 
-# 2. Now import the rest of the libraries
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
+# The correct import path for version 2.x
+from playwright_stealth.stealth import stealth_sync 
 from bs4 import BeautifulSoup
 import time
 
-# 3. Install the Chromium browser
 os.system("playwright install chromium")
 
 def analyze_seats(url):
     results = {"total": 0, "available": 0, "sold": 0, "error": None}
     
     with sync_playwright() as p:
-        # Launch with arguments that disable standard automation flags
         browser = p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"]
@@ -28,23 +25,19 @@ def analyze_seats(url):
         )
         page = context.new_page()
         
-        # Apply stealth scripts to bypass Cloudflare/bot detection
         stealth_sync(page)
         
         try:
             page.goto(url, wait_until="load", timeout=60000)
             
-            # Brute force wait to let all iframes, SVGs, and anti-bot scripts settle
             time.sleep(12)
             
-            # Try to click cookie banners blindly
             try:
                 page.locator("button:has-text('Accept')").first.click(timeout=2000)
                 time.sleep(2)
             except:
                 pass
 
-            # Collect HTML from the main page AND all iframes
             all_html = [page.content()]
             for frame in page.frames:
                 try:
@@ -52,19 +45,16 @@ def analyze_seats(url):
                 except:
                     pass
             
-            # Parse all collected HTML
             found_seats = False
             for html in all_html:
                 soup = BeautifulSoup(html, 'html.parser')
                 
-                # Spektrix uses paths, circles, or rects for seats
                 seats = soup.find_all(['circle', 'path', 'rect', 'ellipse'])
                 
                 for seat in seats:
                     classes = " ".join(seat.get('class', [])).lower()
                     fill = seat.get('fill', '').lower()
                     
-                    # Filter out non-seat SVG elements by checking for common seat classes
                     if 'available' in classes or 'locked' in classes or 'seat' in classes:
                         found_seats = True
                         results["total"] += 1
@@ -74,7 +64,6 @@ def analyze_seats(url):
                         else:
                             results["available"] += 1
                             
-                # Stop looking through other frames if we found the seats
                 if found_seats:
                     break 
             
