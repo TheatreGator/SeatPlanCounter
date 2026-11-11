@@ -1,108 +1,84 @@
 import streamlit as st
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
+from bs4 import BeautifulSoup
 import time
 import os
-import json
 
-# Install the Chromium browser when the app boots on Streamlit Cloud
 os.system("playwright install chromium")
 
 def analyze_seats(url):
     results = {"total": 0, "available": 0, "sold": 0, "error": None}
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # Launch with arguments that disable standard automation flags
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
         )
         page = context.new_page()
         
-        captured_jsons = []
+        # Apply stealth scripts to bypass Cloudflare/bot detection
+        stealth_sync(page)
         
-        # Intercept ALL JSON responses, regardless of what the URL is
-        def handle_response(response):
+        try:
+            page.goto(url, wait_until="load", timeout=60000)
+            
+            # Brute force wait to let all iframes, SVGs, and anti-bot scripts settle
+            time.sleep(12)
+            
+            # Try to click cookie banners blindly
             try:
-                if response.ok and "application/json" in response.headers.get("content-type", ""):
-                    # Ignore tiny responses to save processing time
-                    if int(response.headers.get("content-length", 0)) > 1000 or response.headers.get("content-length") is None:
-                        data = response.json()
-                        captured_jsons.append(data)
+                page.locator("button:has-text('Accept')").first.click(timeout=2000)
+                time.sleep(2)
             except:
                 pass
 
-        page.on("response", handle_response)
-        
-        # Intercept and abort media to speed up loading
-        page.route("**/*", lambda route: route.abort() 
-            if route.request.resource_type in ["image", "font", "media", "stylesheet"] 
-            else route.continue_())
-        
-        try:
-            # 1. Load the main page
-            page.goto(url, wait_until="networkidle", timeout=45000)
-            time.sleep(5) # Allow final API calls to resolve
+            # Collect HTML from the main page AND all iframes
+            all_html = [page.content()]
+            for frame in page.frames:
+                try:
+                    all_html.append(frame.content())
+                except:
+                    pass
             
-            if not captured_jsons:
-                page.screenshot(path="debug_error.png")
-                results["error"] = "No JSON data was loaded by the page at all. Saved screenshot."
-                return results
-
-            # 2. Search through ALL captured JSONs for seat data
-            found_seat_data = False
-            for data in captured_jsons:
+            # Parse all collected HTML
+            found_seats = False
+            for html in all_html:
+                soup = BeautifulSoup(html, 'html.parser')
                 
-                # We need a recursive function to find the seat array, because Spektrix 
-                # heavily nests their API responses (e.g. data -> event -> instances -> seats)
-                def find_seats_array(obj):
-                    if isinstance(obj, list):
-                        # Is this a list of seats? Check if the first item has typical seat properties
-                        if len(obj) > 0 and isinstance(obj[0], dict):
-                            keys = obj[0].keys()
-                            if "StatusId" in keys or "IsAvailable" in keys or "SeatId" in keys or "Status" in keys:
-                                return obj
-                        # If not, check inside the list items
-                        for item in obj:
-                            res = find_seats_array(item)
-                            if res: return res
-                            
-                    elif isinstance(obj, dict):
-                        # Explicitly check for known Spektrix keys first
-                        for key in ["Seats", "seats", "Entities", "AvailableSeats"]:
-                            if key in obj and isinstance(obj[key], list):
-                                return obj[key]
-                        # Otherwise search recursively down the dictionary
-                        for val in obj.values():
-                            res = find_seats_array(val)
-                            if res: return res
-                    return None
-
-                seats = find_seats_array(data)
+                # Spektrix uses paths, circles, or rects for seats
+                seats = soup.find_all(['circle', 'path', 'rect', 'ellipse'])
                 
-                if seats:
-                    found_seat_data = True
-                    for seat in seats:
+                for seat in seats:
+                    classes = " ".join(seat.get('class', [])).lower()
+                    fill = seat.get('fill', '').lower()
+                    
+                    # Filter out non-seat SVG elements by checking for common seat classes
+                    if 'available' in classes or 'locked' in classes or 'seat' in classes:
+                        found_seats = True
                         results["total"] += 1
                         
-                        # Handle different versions of the Spektrix API
-                        is_available = seat.get("IsAvailable", False)
-                        status = seat.get("Status", seat.get("StatusId", 1))
-                        
-                        # Status is usually 0 or "Available" if free
-                        if is_available or status == 0 or str(status).lower() == "available":
-                            results["available"] += 1
-                        else:
+                        if 'unavailable' in classes or 'locked' in classes or fill in ['#cccccc', '#ccc', 'grey', 'gray', 'none']:
                             results["sold"] += 1
+                        else:
+                            results["available"] += 1
                             
-                    # Once we found and counted the seats, stop searching
-                    break
+                # Stop looking through other frames if we found the seats
+                if found_seats:
+                    break 
             
-            if not found_seat_data:
+            if not found_seats:
                 page.screenshot(path="debug_error.png")
-                results["error"] = "Intercepted network data, but none of it contained seat availability. The event may not have a seating plan, or it is sold out. Saved screenshot."
-
+                results["error"] = "Bypassed basic bot detection, but still couldn't find SVG seats. Look at the screenshot below to see exactly what the bot is seeing."
+                
         except Exception as e:
             page.screenshot(path="debug_error.png")
-            results["error"] = f"{str(e)} (Screenshot saved)"
+            results["error"] = f"Crash: {str(e)}"
         finally:
             browser.close()
             
@@ -117,16 +93,16 @@ url_input = st.text_input("Enter Booking URL:", placeholder="https://leedsherita
 
 if st.button("Check Seats", type="primary"):
     if url_input:
-        with st.spinner("Intercepting ticketing API data (this may take up to 20 seconds)..."):
+        with st.spinner("Bypassing bot detection and parsing iframes (this takes ~15 seconds)..."):
             if os.path.exists("debug_error.png"):
                 os.remove("debug_error.png")
                 
             results = analyze_seats(url_input)
             
             if results.get("error"):
-                st.error(f"Failed to scrape: {results['error']}")
+                st.error(results['error'])
                 if os.path.exists("debug_error.png"):
-                    st.image("debug_error.png", caption="What the bot saw before failing")
+                    st.image("debug_error.png", caption="Headless Browser Output")
             else:
                 st.success("Analysis Complete!")
                 col1, col2, col3 = st.columns(3)
