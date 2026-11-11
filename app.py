@@ -1,10 +1,16 @@
 import streamlit as st
+import os
+
+# 1. Force install the stealth package BEFORE importing it
+os.system("pip install playwright-stealth")
+
+# 2. Now import the rest of the libraries
 from playwright.sync_api import sync_playwright
 from playwright_stealth import stealth_sync
 from bs4 import BeautifulSoup
 import time
-import os
 
+# 3. Install the Chromium browser
 os.system("playwright install chromium")
 
 def analyze_seats(url):
