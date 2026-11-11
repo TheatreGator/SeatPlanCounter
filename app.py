@@ -2,6 +2,10 @@ import streamlit as st
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import time
+import os
+
+# Install the Chromium browser when the app boots on Streamlit Cloud
+os.system("playwright install chromium")
 
 def analyze_seats(url):
     with sync_playwright() as p:
@@ -53,7 +57,6 @@ def analyze_seats(url):
             for seat in all_seats:
                 # Different ticketing systems use different markers for "sold". 
                 # Common patterns: a specific class like 'unavailable', 'locked', or a grey 'fill' color.
-                # Example assumes 'available' vs 'unavailable' classes, or looking at the fill attribute:
                 classes = seat.get('class', [])
                 fill = seat.get('fill', '').lower()
                 
