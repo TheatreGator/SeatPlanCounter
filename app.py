@@ -17,83 +17,88 @@ def analyze_seats(url):
         )
         page = context.new_page()
         
-        # We will store the intercepted JSON data here
-        captured_seat_data = []
+        captured_jsons = []
         
-        # --- THE MAGIC ---
-        # Listen to all network responses. 
-        # When Spektrix requests the seat status data, we intercept the JSON response.
+        # Intercept ALL JSON responses, regardless of what the URL is
         def handle_response(response):
-            # Spektrix seat data endpoints typically contain these keywords
-            if "api" in response.url.lower() and ("seats" in response.url.lower() or "availability" in response.url.lower() or "status" in response.url.lower()):
-                try:
-                    # Only try to parse if it's a successful JSON response
-                    if response.ok and "application/json" in response.headers.get("content-type", ""):
+            try:
+                if response.ok and "application/json" in response.headers.get("content-type", ""):
+                    # Ignore tiny responses to save processing time
+                    if int(response.headers.get("content-length", 0)) > 1000 or response.headers.get("content-length") is None:
                         data = response.json()
-                        captured_seat_data.append(data)
-                except:
-                    pass
+                        captured_jsons.append(data)
+            except:
+                pass
 
         page.on("response", handle_response)
         
-        # Intercept and abort media to speed up loading, but ALLOW all API/fetch requests
+        # Intercept and abort media to speed up loading
         page.route("**/*", lambda route: route.abort() 
-            if route.request.resource_type in ["image", "font", "media"] 
+            if route.request.resource_type in ["image", "font", "media", "stylesheet"] 
             else route.continue_())
         
         try:
-            # 1. Load the main page and wait for the network to settle
+            # 1. Load the main page
             page.goto(url, wait_until="networkidle", timeout=45000)
+            time.sleep(5) # Allow final API calls to resolve
             
-            # Wait a few extra seconds to ensure the async API calls finish
-            time.sleep(5)
-            
-            # 2. Check if we captured the API data
-            if not captured_seat_data:
-                # Fallback: take a screenshot if we didn't get the data
+            if not captured_jsons:
                 page.screenshot(path="debug_error.png")
-                results["error"] = "Could not intercept the Spektrix seat API request. The URL might be incorrect or the event is sold out/past. Saved screenshot."
+                results["error"] = "No JSON data was loaded by the page at all. Saved screenshot."
                 return results
 
-            # 3. Parse the JSON Data
-            # Note: The exact JSON structure varies slightly depending on whether they use 
-            # Spektrix API v3 or the newer Web Components, but generally looks like a list of seats.
-            
-            # We loop through all captured JSONs (usually there's only 1 relevant one)
-            for data_payload in captured_seat_data:
-                # Case A: Data is a direct list of seats
-                if isinstance(data_payload, list):
-                    seats = data_payload
-                # Case B: Data is wrapped in a dictionary (e.g., {"Seats": [...]})
-                elif isinstance(data_payload, dict):
-                    # Guess the key holding the seats
-                    seats = data_payload.get("Seats", data_payload.get("seats", data_payload.get("Entities", [])))
-                else:
-                    continue
+            # 2. Search through ALL captured JSONs for seat data
+            found_seat_data = False
+            for data in captured_jsons:
+                
+                # We need a recursive function to find the seat array, because Spektrix 
+                # heavily nests their API responses (e.g. data -> event -> instances -> seats)
+                def find_seats_array(obj):
+                    if isinstance(obj, list):
+                        # Is this a list of seats? Check if the first item has typical seat properties
+                        if len(obj) > 0 and isinstance(obj[0], dict):
+                            keys = obj[0].keys()
+                            if "StatusId" in keys or "IsAvailable" in keys or "SeatId" in keys or "Status" in keys:
+                                return obj
+                        # If not, check inside the list items
+                        for item in obj:
+                            res = find_seats_array(item)
+                            if res: return res
+                            
+                    elif isinstance(obj, dict):
+                        # Explicitly check for known Spektrix keys first
+                        for key in ["Seats", "seats", "Entities", "AvailableSeats"]:
+                            if key in obj and isinstance(obj[key], list):
+                                return obj[key]
+                        # Otherwise search recursively down the dictionary
+                        for val in obj.values():
+                            res = find_seats_array(val)
+                            if res: return res
+                    return None
 
-                if not seats:
-                    continue
+                seats = find_seats_array(data)
                 
-                # Count the status
-                for seat in seats:
-                    results["total"] += 1
-                    
-                    # Spektrix typically uses a 'StatusId', 'IsAvailable', or 'Status' field
-                    # 0 usually means available, integers > 0 mean sold/locked/held
-                    is_available = seat.get("IsAvailable", False)
-                    status_id = seat.get("StatusId", seat.get("Status", 1))
-                    
-                    if is_available or status_id == 0 or status_id == "Available":
-                        results["available"] += 1
-                    else:
-                        results["sold"] += 1
-                
-                # If we found and counted seats, break out of the loop
-                if results["total"] > 0:
+                if seats:
+                    found_seat_data = True
+                    for seat in seats:
+                        results["total"] += 1
+                        
+                        # Handle different versions of the Spektrix API
+                        is_available = seat.get("IsAvailable", False)
+                        status = seat.get("Status", seat.get("StatusId", 1))
+                        
+                        # Status is usually 0 or "Available" if free
+                        if is_available or status == 0 or str(status).lower() == "available":
+                            results["available"] += 1
+                        else:
+                            results["sold"] += 1
+                            
+                    # Once we found and counted the seats, stop searching
                     break
             
-            if results["total"] == 0:
-                results["error"] = "Intercepted API data, but couldn't parse the seat status format."
+            if not found_seat_data:
+                page.screenshot(path="debug_error.png")
+                results["error"] = "Intercepted network data, but none of it contained seat availability. The event may not have a seating plan, or it is sold out. Saved screenshot."
 
         except Exception as e:
             page.screenshot(path="debug_error.png")
