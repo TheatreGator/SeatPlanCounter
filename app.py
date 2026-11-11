@@ -17,10 +17,10 @@ Object.defineProperty(navigator, 'webdriver', {
 # SCRAPER 1: SPEKTRIX (Visual HTML Method)
 # ==========================================
 def analyze_spektrix(url, page):
-    results = {"total": 0, "available": 0, "sold": 0, "error": None}
+    results = {"total": 0, "available": 0, "sold": 0, "colors": {}, "error": None}
     
     page.goto(url, wait_until="load", timeout=60000)
-    time.sleep(15)
+    time.sleep(15)  # Wait for iframes and SVG to settle
     
     try:
         page.locator("button:has-text('Accept')").first.click(timeout=2000)
@@ -55,6 +55,9 @@ def analyze_spektrix(url, page):
                         results["sold"] += 1
                     else:
                         results["available"] += 1
+                        # Tally the colors of available seats
+                        if fill:
+                            results["colors"][fill] = results["colors"].get(fill, 0) + 1
                 break 
         except:
             continue
@@ -70,7 +73,7 @@ def analyze_spektrix(url, page):
 # SCRAPER 2: TRAFALGAR (Hybrid HTML + API Method)
 # ==========================================
 def analyze_trafalgar(url, page):
-    results = {"total": 0, "available": 0, "sold": 0, "error": None}
+    results = {"total": 0, "available": 0, "sold": 0, "colors": {}, "error": None}
     intercepted_jsons = []
     
     # 1. Listen for the background array containing SOLD seats
@@ -90,7 +93,7 @@ def analyze_trafalgar(url, page):
     except:
         pass
 
-    # 2. Extract HTML to count AVAILABLE seats (p-1 circles)
+    # 2. Extract HTML to count AVAILABLE seats and their COLORS
     all_html = [page.content()]
     for frame in page.frames:
         try:
@@ -106,6 +109,9 @@ def analyze_trafalgar(url, page):
             classes = " ".join(seat.get('class', [])).lower()
             if 'p-1' in classes or 'available' in classes or 'seat' in classes:
                 results["available"] += 1
+                fill = seat.get('fill', '').lower()
+                if fill:
+                    results["colors"][fill] = results["colors"].get(fill, 0) + 1
                 
         if results["available"] > 0:
             break
@@ -126,7 +132,6 @@ def analyze_trafalgar(url, page):
     for data in intercepted_jsons:
         find_largest_array(data)
 
-    # 4. Combine the logic
     results["sold"] = len(largest_array)
     results["total"] = results["available"] + results["sold"]
     sample = largest_array[:3] if largest_array else None
@@ -141,7 +146,7 @@ def analyze_trafalgar(url, page):
 # ==========================================
 # MAIN BROWSER ROUTER
 # ==========================================
-def analyze_seats(url):
+def analyze_seats(url, platform):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -155,22 +160,19 @@ def analyze_seats(url):
         page = context.new_page()
         
         try:
-            if "trafalgartickets.com" in url.lower():
+            if platform == "Trafalgar Tickets":
                 results, sample = analyze_trafalgar(url, page)
-                method_used = "Trafalgar Hybrid (API + HTML)"
             else:
                 results, sample = analyze_spektrix(url, page)
-                method_used = "Spektrix HTML"
                 
         except Exception as e:
             page.screenshot(path="debug_error.png")
             results = {"error": f"Crash: {str(e)}"}
             sample = None
-            method_used = "Error"
         finally:
             browser.close()
             
-        return results, sample, method_used
+        return results, sample
 
 
 # ==========================================
@@ -178,31 +180,67 @@ def analyze_seats(url):
 # ==========================================
 st.set_page_config(page_title="Theatre Seat Counter", page_icon="🎭", layout="wide")
 st.title("🎭 Theatre Seat Availability Checker")
-st.markdown("Enter a theatre booking link to calculate how many seats are sold vs. available.")
+st.markdown("Calculate seat availability and forecast remaining gross profit.")
 
+# Form controls
 url_input = st.text_input("Enter Booking URL:", placeholder="https://...")
+platform_choice = st.selectbox("Select Booking Platform:", ["Spektrix", "Trafalgar Tickets"])
 
 if st.button("Check Seats", type="primary"):
     if url_input:
-        with st.spinner("Analyzing booking platform (this takes ~20 seconds)..."):
+        with st.spinner(f"Bypassing bot detection and analyzing {platform_choice} (takes ~20 seconds)..."):
             if os.path.exists("debug_error.png"):
                 os.remove("debug_error.png")
                 
-            results, sample, method_used = analyze_seats(url_input)
+            results, sample = analyze_seats(url_input, platform_choice)
             
             if results.get("error"):
                 st.error(results['error'])
                 if os.path.exists("debug_error.png"):
                     st.image("debug_error.png", caption="Headless Browser Output")
             else:
-                st.success(f"Analysis Complete! (Used {method_used} Method)")
+                st.success("Analysis Complete!")
                 col1, col2, col3 = st.columns(3)
                 col1.metric("Total Seats", results["total"])
                 col2.metric("Available", results["available"])
                 col3.metric("Sold", results["sold"])
                 
+                st.divider()
+                
+                # Financial Calculator Section
+                st.subheader("Available Gross Profit Calculator")
+                if not results.get("colors"):
+                    st.warning("Could not detect distinct colors for the available seats.")
+                else:
+                    st.write("Assign a ticket price to each color band to calculate potential remaining revenue.")
+                    
+                    total_potential_revenue = 0.0
+                    
+                    # Create a neat grid for the colors
+                    cols = st.columns(3)
+                    col_index = 0
+                    
+                    for color, count in results["colors"].items():
+                        with cols[col_index % 3]:
+                            # Draw a little colored circle in the UI
+                            st.markdown(
+                                f'<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">'
+                                f'<div style="background-color: {color}; width: 20px; height: 20px; border-radius: 50%; border: 1px solid #ccc;"></div>'
+                                f'<strong>{count} seats</strong>'
+                                f'</div>', 
+                                unsafe_allow_html=True
+                            )
+                            # Let user input the price for this band
+                            price = st.number_input(f"Price (£)", key=f"price_{color}", value=0.0, step=1.0)
+                            total_potential_revenue += price * count
+                        
+                        col_index += 1
+                        
+                    st.write("")
+                    st.metric("Total Available GP Left", f"£{total_potential_revenue:,.2f}")
+                
                 if sample:
-                    with st.expander("View Diagnostic API Data"):
+                    with st.expander("View Diagnostic API Data (Trafalgar)"):
                         st.code(str(sample), language="json")
     else:
         st.warning("Please enter a valid URL.")
