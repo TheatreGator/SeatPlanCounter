@@ -5,7 +5,6 @@ import json
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# Install the Chromium browser when the app boots
 os.system("playwright install chromium")
 
 STEALTH_SCRIPT = """
@@ -15,7 +14,7 @@ Object.defineProperty(navigator, 'webdriver', {
 """
 
 # ==========================================
-# SCRAPER 1: SPEKTRIX (Visual HTML Method)
+# SCRAPER 1: SPEKTRIX (Restored Original Logic)
 # ==========================================
 def analyze_spektrix(url, page):
     results = {"total": 0, "available": 0, "sold": 0, "error": None}
@@ -25,50 +24,51 @@ def analyze_spektrix(url, page):
     
     try:
         page.locator("button:has-text('Accept')").first.click(timeout=2000)
-        time.sleep(2)
     except:
         pass
 
-    all_html = [page.content()]
-    for frame in page.frames:
-        try:
-            all_html.append(frame.content())
-        except:
-            pass
-    
-    found_seats = False
-    for html in all_html:
-        soup = BeautifulSoup(html, 'html.parser')
-        seats = soup.find_all(['circle', 'path', 'rect', 'ellipse'])
+    target_frame = None
+    for f in page.frames:
+        if "spektrix" in f.url.lower() or "booking" in f.url.lower():
+            target_frame = f
+            break
+            
+    if not target_frame and len(page.frames) > 1:
+        target_frame = page.frames[1] 
         
-        for seat in seats:
-            classes = " ".join(seat.get('class', [])).lower()
-            fill = seat.get('fill', '').lower()
+    if not target_frame:
+        # Fallback to scanning all frames just in case
+        frames_to_scan = page.frames
+    else:
+        frames_to_scan = [target_frame]
+
+    found_seats = False
+    for frame in frames_to_scan:
+        try:
+            soup = BeautifulSoup(frame.content(), 'html.parser')
+            all_seats = soup.find_all('circle')
             
-            parent = seat.find_parent('g')
-            parent_classes = " ".join(parent.get('class', [])).lower() if parent else ""
-            parent_fill = (parent.get('fill', '') if parent else '').lower()
-            
-            combined_classes = classes + " " + parent_classes
-            combined_fill = fill or parent_fill
-            
-            if 'available' in combined_classes or 'locked' in combined_classes or 'seat' in combined_classes:
+            if all_seats:
                 found_seats = True
-                results["total"] += 1
-                
-                if 'unavailable' in combined_classes or 'locked' in combined_classes or 'sold' in combined_classes or combined_fill in ['#cccccc', '#ccc', '#e0e0e0', '#eeeeee', 'grey', 'gray', 'none']:
-                    results["sold"] += 1
-                else:
-                    results["available"] += 1
+                for seat in all_seats:
+                    results["total"] += 1
+                    classes = seat.get('class', [])
+                    fill = seat.get('fill', '').lower()
                     
-        if found_seats:
-            break 
-    
+                    # Original working Spektrix logic
+                    if 'unavailable' in classes or 'locked' in classes or fill in ['#cccccc', 'grey', 'gray', 'none']:
+                        results["sold"] += 1
+                    else:
+                        results["available"] += 1
+                break # Stop scanning frames if we found the seats
+        except:
+            continue
+            
     if not found_seats:
         page.screenshot(path="debug_error.png")
-        results["error"] = "No SVG seats found. Ensure the event isn't sold out/past. Saved screenshot."
+        results["error"] = "No SVG circles found. The event may be sold out, or the iframe structure blocked the scraper. Saved screenshot."
         
-    return results, None  # Spektrix doesn't need to return a JSON sample
+    return results, None
 
 
 # ==========================================
@@ -109,21 +109,21 @@ def analyze_trafalgar(url, page):
     for data in intercepted_jsons:
         find_largest_array(data)
 
-    if len(largest_array) < 50:
+    if len(largest_array) < 10:
         results["error"] = "Intercepted background data, but couldn't find a list large enough to be a seat manifest."
         return results, None
 
-    results["total"] = len(largest_array)
-    sample = largest_array[0] 
+    # We pull the first 3 items safely to see what the data actually looks like
+    sample = largest_array[:3]
     
+    # We will safely guess based on the array contents
+    results["total"] = len(largest_array)
     for seat in largest_array:
         seat_str = str(seat).lower()
         if ("'status': 0" in seat_str or 
             "'status': 'available'" in seat_str or 
             "'isavailable': true" in seat_str or 
-            "'available': true" in seat_str or 
-            "'state': 0" in seat_str or
-            "'statusid': 0" in seat_str):
+            "'available': true" in seat_str):
             results["available"] += 1
         else:
             results["sold"] += 1
@@ -148,7 +148,6 @@ def analyze_seats(url):
         page = context.new_page()
         
         try:
-            # Smart Routing: Check URL and send to the correct scraper
             if "trafalgartickets.com" in url.lower():
                 results, sample = analyze_trafalgar(url, page)
                 method_used = "Trafalgar API"
@@ -178,7 +177,7 @@ url_input = st.text_input("Enter Booking URL:", placeholder="https://...")
 
 if st.button("Check Seats", type="primary"):
     if url_input:
-        with st.spinner("Analyzing booking platform (this takes ~15-20 seconds)..."):
+        with st.spinner("Analyzing booking platform (this takes ~20 seconds)..."):
             if os.path.exists("debug_error.png"):
                 os.remove("debug_error.png")
                 
@@ -191,15 +190,16 @@ if st.button("Check Seats", type="primary"):
             else:
                 st.success(f"Analysis Complete! (Used {method_used} Method)")
                 col1, col2, col3 = st.columns(3)
-                col1.metric("Total Seats", results["total"])
+                col1.metric("Total Seats (Array Length)", results["total"])
                 col2.metric("Available", results["available"])
                 col3.metric("Sold", results["sold"])
                 
-                # Only show the diagnostic data if it was a Trafalgar scan
+                # Show the diagnostic data safely
                 if sample:
                     st.write("---")
                     st.subheader("Diagnostic Tool: API Data Sample")
-                    st.write("To make the counter 100% accurate, look at the background data below. This is what Trafalgar Tickets uses to track a single seat. What property dictates if a seat is sold?")
-                    st.json(sample)
+                    st.write("This is what Trafalgar Tickets uses to track a seat. If the numbers above look wrong, copy the text below so we can fix the counter logic.")
+                    # Using st.code instead of st.json prevents the Streamlit rendering crash
+                    st.code(str(sample), language="json")
     else:
         st.warning("Please enter a valid URL.")
