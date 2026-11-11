@@ -1,43 +1,54 @@
 import streamlit as st
 import os
-
-os.system("pip install playwright-stealth")
-
-from playwright.sync_api import sync_playwright
-# The correct import path for version 2.x
-from playwright_stealth.stealth import stealth_sync 
-from bs4 import BeautifulSoup
 import time
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
+# Ensure Chromium is installed
 os.system("playwright install chromium")
+
+# A script to overwrite the 'webdriver' property that flags headless browsers as bots
+STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined
+});
+"""
 
 def analyze_seats(url):
     results = {"total": 0, "available": 0, "sold": 0, "error": None}
     
     with sync_playwright() as p:
+        # Launch with arguments that disable standard automation flags
         browser = p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"]
         )
+        
+        # Mimic a standard desktop user
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={'width': 1920, 'height': 1080}
         )
-        page = context.new_page()
         
-        stealth_sync(page)
+        # Inject the stealth script into every new page
+        context.add_init_script(STEALTH_SCRIPT)
+        
+        page = context.new_page()
         
         try:
             page.goto(url, wait_until="load", timeout=60000)
             
-            time.sleep(12)
+            # Brute force wait to let all iframes, SVGs, and anti-bot scripts settle
+            time.sleep(15)
             
+            # Try to click cookie banners blindly
             try:
                 page.locator("button:has-text('Accept')").first.click(timeout=2000)
                 time.sleep(2)
             except:
                 pass
 
+            # Collect HTML from the main page AND all iframes
             all_html = [page.content()]
             for frame in page.frames:
                 try:
@@ -45,16 +56,19 @@ def analyze_seats(url):
                 except:
                     pass
             
+            # Parse all collected HTML
             found_seats = False
             for html in all_html:
                 soup = BeautifulSoup(html, 'html.parser')
                 
+                # Spektrix uses paths, circles, or rects for seats
                 seats = soup.find_all(['circle', 'path', 'rect', 'ellipse'])
                 
                 for seat in seats:
                     classes = " ".join(seat.get('class', [])).lower()
                     fill = seat.get('fill', '').lower()
                     
+                    # Filter out non-seat SVG elements by checking for common seat classes
                     if 'available' in classes or 'locked' in classes or 'seat' in classes:
                         found_seats = True
                         results["total"] += 1
@@ -64,12 +78,13 @@ def analyze_seats(url):
                         else:
                             results["available"] += 1
                             
+                # Stop looking through other frames if we found the seats
                 if found_seats:
                     break 
             
             if not found_seats:
                 page.screenshot(path="debug_error.png")
-                results["error"] = "Bypassed basic bot detection, but still couldn't find SVG seats. Look at the screenshot below to see exactly what the bot is seeing."
+                results["error"] = "Bypassed basic bot detection, but still couldn't find SVG seats. The event might be sold out or the platform is using advanced Canvas rendering. Look at the screenshot below to see exactly what the bot is seeing."
                 
         except Exception as e:
             page.screenshot(path="debug_error.png")
@@ -88,7 +103,7 @@ url_input = st.text_input("Enter Booking URL:", placeholder="https://leedsherita
 
 if st.button("Check Seats", type="primary"):
     if url_input:
-        with st.spinner("Bypassing bot detection and parsing iframes (this takes ~15 seconds)..."):
+        with st.spinner("Bypassing bot detection and parsing iframes (this takes ~20 seconds)..."):
             if os.path.exists("debug_error.png"):
                 os.remove("debug_error.png")
                 
