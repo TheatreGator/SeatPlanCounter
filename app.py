@@ -13,6 +13,26 @@ Object.defineProperty(navigator, 'webdriver', {
 });
 """
 
+# Helper function to aggressively hunt down the fill color
+def extract_color(element):
+    if not element:
+        return None
+        
+    # 1. Check direct 'fill' attribute
+    fill = element.get('fill', '').lower().strip()
+    if fill and fill not in ['none', 'transparent', '']:
+        return fill
+        
+    # 2. Check inline 'style' attribute (e.g., style="fill: #ff0000;")
+    style = element.get('style', '').lower()
+    if 'fill:' in style:
+        try:
+            return style.split('fill:')[1].split(';')[0].strip()
+        except:
+            pass
+            
+    return None
+
 # ==========================================
 # SCRAPER 1: SPEKTRIX (Visual HTML Method)
 # ==========================================
@@ -20,7 +40,7 @@ def analyze_spektrix(url, page):
     results = {"total": 0, "available": 0, "sold": 0, "colors": {}, "error": None}
     
     page.goto(url, wait_until="load", timeout=60000)
-    time.sleep(15)  # Wait for iframes and SVG to settle
+    time.sleep(15) 
     
     try:
         page.locator("button:has-text('Accept')").first.click(timeout=2000)
@@ -48,16 +68,22 @@ def analyze_spektrix(url, page):
                 found_seats = True
                 for seat in all_seats:
                     results["total"] += 1
-                    classes = seat.get('class', [])
-                    fill = seat.get('fill', '').lower()
+                    classes = " ".join(seat.get('class', [])).lower()
                     
-                    if 'unavailable' in classes or 'locked' in classes or fill in ['#cccccc', 'grey', 'gray', 'none']:
+                    # Aggressive color hunt
+                    color = extract_color(seat)
+                    if not color:
+                        color = extract_color(seat.find_parent('g'))
+                        
+                    if 'unavailable' in classes or 'locked' in classes or color in ['#cccccc', '#ccc', '#e0e0e0', 'grey', 'gray', 'none']:
                         results["sold"] += 1
                     else:
                         results["available"] += 1
-                        # Tally the colors of available seats
-                        if fill:
-                            results["colors"][fill] = results["colors"].get(fill, 0) + 1
+                        if color:
+                            results["colors"][color] = results["colors"].get(color, 0) + 1
+                        else:
+                            # Fallback if color is completely hidden in external CSS
+                            results["colors"]["Unknown Color"] = results["colors"].get("Unknown Color", 0) + 1
                 break 
         except:
             continue
@@ -76,7 +102,6 @@ def analyze_trafalgar(url, page):
     results = {"total": 0, "available": 0, "sold": 0, "colors": {}, "error": None}
     intercepted_jsons = []
     
-    # 1. Listen for the background array containing SOLD seats
     def handle_response(response):
         try:
             if response.ok and "application/json" in response.headers.get("content-type", ""):
@@ -93,7 +118,6 @@ def analyze_trafalgar(url, page):
     except:
         pass
 
-    # 2. Extract HTML to count AVAILABLE seats and their COLORS
     all_html = [page.content()]
     for frame in page.frames:
         try:
@@ -109,14 +133,21 @@ def analyze_trafalgar(url, page):
             classes = " ".join(seat.get('class', [])).lower()
             if 'p-1' in classes or 'available' in classes or 'seat' in classes:
                 results["available"] += 1
-                fill = seat.get('fill', '').lower()
-                if fill:
-                    results["colors"][fill] = results["colors"].get(fill, 0) + 1
+                
+                # Aggressive color hunt
+                color = extract_color(seat)
+                if not color:
+                    color = extract_color(seat.find_parent('g'))
+                
+                if color:
+                    results["colors"][color] = results["colors"].get(color, 0) + 1
+                else:
+                    # Fallback if color is strictly in an external stylesheet
+                    results["colors"]["Unknown Color"] = results["colors"].get("Unknown Color", 0) + 1
                 
         if results["available"] > 0:
             break
 
-    # 3. Find the largest API array to get the SOLD seats
     largest_array = []
     def find_largest_array(obj):
         nonlocal largest_array
@@ -182,7 +213,6 @@ st.set_page_config(page_title="Theatre Seat Counter", page_icon="🎭", layout="
 st.title("🎭 Theatre Seat Availability Checker")
 st.markdown("Calculate seat availability and forecast remaining gross profit.")
 
-# Form controls
 url_input = st.text_input("Enter Booking URL:", placeholder="https://...")
 platform_choice = st.selectbox("Select Booking Platform:", ["Spektrix", "Trafalgar Tickets"])
 
@@ -207,7 +237,6 @@ if st.button("Check Seats", type="primary"):
                 
                 st.divider()
                 
-                # Financial Calculator Section
                 st.subheader("Available Gross Profit Calculator")
                 if not results.get("colors"):
                     st.warning("Could not detect distinct colors for the available seats.")
@@ -215,22 +244,23 @@ if st.button("Check Seats", type="primary"):
                     st.write("Assign a ticket price to each color band to calculate potential remaining revenue.")
                     
                     total_potential_revenue = 0.0
-                    
-                    # Create a neat grid for the colors
                     cols = st.columns(3)
                     col_index = 0
                     
                     for color, count in results["colors"].items():
                         with cols[col_index % 3]:
-                            # Draw a little colored circle in the UI
-                            st.markdown(
-                                f'<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">'
-                                f'<div style="background-color: {color}; width: 20px; height: 20px; border-radius: 50%; border: 1px solid #ccc;"></div>'
-                                f'<strong>{count} seats</strong>'
-                                f'</div>', 
-                                unsafe_allow_html=True
-                            )
-                            # Let user input the price for this band
+                            # If color is 'Unknown Color', we don't try to render a hex color box
+                            if color.startswith("#") or color.isalpha():
+                                st.markdown(
+                                    f'<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">'
+                                    f'<div style="background-color: {color}; width: 20px; height: 20px; border-radius: 50%; border: 1px solid #ccc;"></div>'
+                                    f'<strong>{count} seats</strong>'
+                                    f'</div>', 
+                                    unsafe_allow_html=True
+                                )
+                            else:
+                                st.markdown(f"**{count} seats ({color})**")
+                                
                             price = st.number_input(f"Price (£)", key=f"price_{color}", value=0.0, step=1.0)
                             total_potential_revenue += price * count
                         
