@@ -9,62 +9,61 @@ os.system("playwright install chromium")
 
 def analyze_seats(url):
     with sync_playwright() as p:
-        # Launch Chromium headless
         browser = p.chromium.launch(headless=True)
-        # Create a new context to mimic a real user
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080} # Set a desktop viewport
         )
         page = context.new_page()
         
+        # 1. Intercept and abort unnecessary resources to prevent timeouts
+        page.route("**/*", lambda route: route.abort() 
+            if route.request.resource_type in ["image", "font", "media", "stylesheet"] 
+            else route.continue_())
+        
         try:
-            # Navigate to the booking URL
-            page.goto(url, wait_until="networkidle")
+            # 2. Use domcontentloaded instead of networkidle
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
             
-            # Wait for the iframe holding the Spektrix/ticketing portal
+            # 3. Blindly try to click common cookie consent buttons if they exist
+            try:
+                page.locator("button:has-text('Accept')").first.click(timeout=3000)
+            except:
+                pass # Ignore if no cookie banner is found
+            
+            # Wait for the iframe
             page.wait_for_selector("iframe", timeout=15000)
             
-            # Get the ticketing frame (often the first iframe, or specifically the spektrix one)
             frame = None
             for f in page.frames:
                 if "spektrix" in f.url.lower() or "booking" in f.url.lower():
                     frame = f
                     break
             
-            # Fallback to the first child frame if a specific name wasn't matched
             if not frame and len(page.frames) > 1:
                 frame = page.frames[1] 
                 
             if not frame:
                 return {"error": "Could not locate the ticketing iframe on this page."}
 
-            # Wait for the SVG seating plan to render inside the iframe
             frame.wait_for_selector("svg", timeout=15000)
+            time.sleep(3) # Ensure dynamic seat classes are applied
             
-            # Give it a short pause to ensure dynamic classes (colors) are fully applied
-            time.sleep(2) 
-            
-            # Extract the raw HTML/SVG content from the frame
             html_content = frame.content()
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Parse the SVG circles (seats)
             all_seats = soup.find_all('circle')
             
             available_seats = 0
             sold_seats = 0
             
             for seat in all_seats:
-                # Different ticketing systems use different markers for "sold". 
-                # Common patterns: a specific class like 'unavailable', 'locked', or a grey 'fill' color.
                 classes = seat.get('class', [])
                 fill = seat.get('fill', '').lower()
                 
-                # Check if it has a class indicating it is unavailable, or a greyed-out fill color
                 if 'unavailable' in classes or 'locked' in classes or fill in ['#cccccc', 'grey', 'gray', 'none']:
                     sold_seats += 1
                 else:
-                    # If it has a color and isn't marked unavailable
                     available_seats += 1
                     
             return {
@@ -92,7 +91,7 @@ if st.button("Check Seats", type="primary"):
             
             if "error" in results:
                 st.error(f"Failed to scrape: {results['error']}")
-                st.info("Note: The site might be blocking headless browsers, or the seating plan structure may have changed.")
+                st.info("Note: If timeouts persist, the ticketing platform is likely detecting and blocking the headless browser.")
             else:
                 st.success("Analysis Complete!")
                 col1, col2, col3 = st.columns(3)
